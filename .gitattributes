@@ -1,0 +1,6 @@
+# Line endings are load-bearing here, so pin them rather than trusting each
+# machine's git config. Shell scripts break with CRLF; batch files misbehave
+# without it.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary

@@ -1,0 +1,5 @@
+# Dependencies for Fantastic HuggingFace Downloader.
+# install.sh / install.bat hash this file and only touch pip when it changes,
+# so re-running the installer is cheap when nothing has moved.
+PySide6
+huggingface_hub[hf_xet]
