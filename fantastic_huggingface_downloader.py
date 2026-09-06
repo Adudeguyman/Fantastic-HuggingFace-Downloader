@@ -30,7 +30,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QGuiApplication
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QPalette
 
 from theme import Theme, build_stylesheet, lucide_arrow_url, lucide_icon
 from PySide6.QtWidgets import (
@@ -406,6 +406,13 @@ def extra_stylesheet(t: Theme) -> str:
     }}
     QComboBox::down-arrow:disabled {{ image: url({combo_arrow_off}); }}
     QComboBox::drop-down {{ width: 22px; subcontrol-position: center right; }}
+    /* the shared sheet gives #Danger its error colour but no disabled state,
+       so a greyed-out destructive button still looks armed */
+    QPushButton#Danger:disabled {{
+        color: {t.text_disabled};
+        border-color: {t.border};
+        background: transparent;
+    }}
     QGroupBox {{
         background: {t.surface_1};
         border: 1px solid {t.border};
@@ -669,6 +676,92 @@ def strip_prefix_for(target: Target, mode: str) -> str:
     if mode == MODE_FOLDER:
         return folder_prefix(target)
     return ""
+
+
+def hf_token_path() -> Path:
+    """Where the hf CLI keeps its token. Same file `hf auth login` writes."""
+    try:
+        from huggingface_hub import constants
+
+        return Path(constants.HF_TOKEN_PATH)
+    except Exception:  # noqa: BLE001
+        home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
+        return Path(home) / "token"
+
+
+def token_env_override() -> str | None:
+    """
+    HF_TOKEN in the environment beats the saved file, so a token entered here
+    would silently do nothing. Worth telling the user rather than leaving them
+    to wonder why a gated repo still fails.
+    """
+    value = os.environ.get("HF_TOKEN", "").strip()
+    return value or None
+
+
+def read_saved_token() -> str | None:
+    try:
+        value = hf_token_path().read_text().strip()
+        return value or None
+    except OSError:
+        return None
+
+
+def save_token(token: str) -> None:
+    """
+    Write the token the way the CLI does: owner-only file in an owner-only
+    directory.
+
+    Deliberately not huggingface_hub.login(), which validates over the network
+    first and writes nothing if that call fails - so it cannot save a token
+    while offline, or behind a proxy that blocks the check.
+    """
+    path = hf_token_path()
+    try:
+        from huggingface_hub.utils._auth import _write_secret
+
+        _write_secret(path, token.strip())
+        return
+    except Exception:  # noqa: BLE001 - fall back to doing it by hand
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handle = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(handle, "w") as fh:
+        fh.write(token.strip())
+    try:
+        path.chmod(0o600)
+        path.parent.chmod(0o700)
+    except (OSError, NotImplementedError):
+        pass        # Windows has no POSIX modes
+
+
+def clear_token() -> bool:
+    try:
+        hf_token_path().unlink()
+        return True
+    except OSError:
+        return False
+
+
+class TokenCheckWorker(QThread):
+    """Asks the Hub who the token belongs to, without blocking the dialog."""
+
+    done = Signal(str, str, str)     # username, error, kind ("auth"/"offline"/"other")
+
+    def __init__(self, token: str, parent=None):
+        super().__init__(None)
+        self.token = token
+        _LIVE_WORKERS.add(self)
+        self.finished.connect(lambda: _LIVE_WORKERS.discard(self))
+
+    def run(self) -> None:
+        try:
+            from huggingface_hub import HfApi
+
+            info = HfApi().whoami(token=self.token)
+            self.done.emit(str(info.get("name") or info.get("fullname") or "?"), "")
+        except Exception as exc:  # noqa: BLE001
+            self.done.emit("", f"{type(exc).__name__}: {exc}")
 
 
 def resolve_local_dir(dest: str, strip_prefix: str) -> str:
@@ -1085,6 +1178,168 @@ def looks_like_progress(line: str) -> bool:
 # main window
 # --------------------------------------------------------------------------
 
+class SettingsDialog(QDialog):
+    """Somewhere to put a Hugging Face token without opening a terminal."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(560)
+        self.setSizeGripEnabled(True)
+        self.worker: TokenCheckWorker | None = None
+        # Qt renders links in its own dark blue, which is unreadable on this
+        # background, and QSS cannot style an anchor.
+        accent = getattr(parent, "accent", None) or Theme("#2f6fed").accent
+
+        layout = QVBoxLayout(self)
+
+        heading = QLabel("Hugging Face token")
+        heading.setObjectName("FieldHead")
+        layout.addWidget(heading)
+
+        # Two short lines rather than one wrapped one. A wrapped QLabel reports
+        # a single line from sizeHint, so the dialog gets sized for one line and
+        # clips the rest; a label that never wraps reports its true width and
+        # the dialog sizes itself around it.
+        for text in (
+            "Only needed for private or gated repos.",
+            "Create one with read access at "
+            '<a href="https://huggingface.co/settings/tokens">'
+            "huggingface.co/settings/tokens</a>",
+        ):
+            line = QLabel(text)
+            line.setWordWrap(False)
+            line.setOpenExternalLinks(True)
+            palette = line.palette()
+            palette.setColor(QPalette.ColorRole.Link, QColor(accent))
+            line.setPalette(palette)
+            layout.addWidget(line)
+
+        row = QHBoxLayout()
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_edit.setPlaceholderText("hf_...")
+        self.token_edit.textChanged.connect(self._update_state)
+        self.show_btn = QPushButton("Show")
+        self.show_btn.setCheckable(True)
+        self.show_btn.setFixedWidth(70)
+        self.show_btn.toggled.connect(self._toggle_echo)
+        row.addWidget(self.token_edit, 1)
+        row.addWidget(self.show_btn)
+        layout.addLayout(row)
+
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        # error text is unpredictable in length, so reserve a few lines rather
+        # than letting a long message get cut off
+        self.status.setMinimumHeight(self.status.fontMetrics().height() * 3)
+        layout.addWidget(self.status)
+
+        row = QHBoxLayout()
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setObjectName("Primary")
+        self.save_btn.clicked.connect(self._save)
+        self.check_btn = QPushButton("Check")
+        self.check_btn.clicked.connect(self._check)
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.setObjectName("Danger")
+        self.remove_btn.clicked.connect(self._remove)
+        row.addWidget(self.save_btn)
+        row.addWidget(self.check_btn)
+        row.addWidget(self.remove_btn)
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        layout.addLayout(row)
+
+        self.where = QLabel(f"Stored in {hf_token_path()}")
+        self.where.setObjectName("Hint")
+        self.where.setWordWrap(True)
+        layout.addWidget(self.where)
+
+        existing = read_saved_token()
+        if existing:
+            self.token_edit.setText(existing)
+        self._update_state()
+
+        # Let the dialog size itself around its content. 560 is a floor, not a
+        # width: at larger system font sizes the token URL needs more than that
+        # and would otherwise be cut off.
+        self.adjustSize()
+        self.setMinimumWidth(max(560, self.sizeHint().width()))
+
+    def _toggle_echo(self, shown: bool) -> None:
+        self.token_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password
+        )
+        self.show_btn.setText("Hide" if shown else "Show")
+
+    def _update_state(self) -> None:
+        typed = self.token_edit.text().strip()
+        saved = read_saved_token()
+        self.save_btn.setEnabled(bool(typed) and typed != saved)
+        self.check_btn.setEnabled(bool(typed))
+        self.remove_btn.setEnabled(saved is not None)
+
+        override = token_env_override()
+        if override:
+            # a warning, not a hint: the token they just typed will be ignored
+            self.status.setStyleSheet(f"color: {Theme.warning}; font-weight: 500;")
+            self.status.setText(
+                "HF_TOKEN is set in your environment and takes priority over "
+                "anything saved here. Unset it, or the environment token is the "
+                "one that will be used."
+            )
+        elif saved:
+            self.status.setStyleSheet(f"color: {Theme.success};")
+            self.status.setText("A token is saved. Gated repos you have access to will work.")
+        else:
+            self.status.setStyleSheet(f"color: {Theme.text_secondary};")
+            self.status.setText("No token saved. Public repos work without one.")
+
+    def _save(self) -> None:
+        try:
+            save_token(self.token_edit.text())
+        except OSError as exc:
+            self.status.setStyleSheet(f"color: {Theme.error};")
+            self.status.setText(f"Could not save: {exc}")
+            return
+        self._update_state()
+        if not token_env_override():
+            self.status.setStyleSheet(f"color: {Theme.success};")
+            self.status.setText("Saved.")
+
+    def _remove(self) -> None:
+        clear_token()
+        self.token_edit.clear()
+        self._update_state()
+
+    def _check(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self.check_btn.setEnabled(False)
+        self.status.setStyleSheet(f"color: {Theme.text_secondary};")
+        self.status.setText("Asking the Hub who this token belongs to...")
+        self.worker = TokenCheckWorker(self.token_edit.text().strip())
+        self.worker.done.connect(self._checked)
+        self.worker.start()
+
+    def _checked(self, username: str, error: str) -> None:
+        if error:
+            self.status.setStyleSheet(f"color: {Theme.error};")
+            self.status.setText(f"That token did not work: {error}")
+        else:
+            self.status.setStyleSheet(f"color: {Theme.success};")
+            self.status.setText(f"Valid - signed in as {username}.")
+        self.check_btn.setEnabled(bool(self.token_edit.text().strip()))
+
+    def closeEvent(self, event) -> None:
+        if self.worker is not None:
+            self.worker.wait(3000)
+        event.accept()
+
+
 class FilePickerDialog(QDialog):
     """Tick the files you want out of a repo listing."""
 
@@ -1446,11 +1701,16 @@ class MainWindow(QWidget):
         self.go_btn.setIcon(lucide_icon("plus", "#FFFFFF", 16))
         self.go_btn.setDefault(True)
         self.go_btn.clicked.connect(self._add_to_queue)
+        self.settings_btn = QPushButton("  Settings")
+        self.settings_btn.setIcon(lucide_icon("settings", Theme.text_secondary, 16))
+        self.settings_btn.setToolTip("Add a Hugging Face token for private or gated repos")
+        self.settings_btn.clicked.connect(self._open_settings)
         self.open_btn = QPushButton("  Open folder")
         self.open_btn.setIcon(lucide_icon("folder-open", Theme.text_secondary, 16))
         self.open_btn.clicked.connect(self._open_dest)
         row.addWidget(self.go_btn)
         row.addStretch(1)
+        row.addWidget(self.settings_btn)
         row.addWidget(self.open_btn)
         outer.addLayout(row)
 
@@ -1969,6 +2229,9 @@ class MainWindow(QWidget):
             if chosen:
                 self._remember_dest(chosen[0])
                 self._refresh()
+
+    def _open_settings(self) -> None:
+        SettingsDialog(self).exec()
 
     def _open_dest(self) -> None:
         dest = self.dest_combo.currentText().strip()

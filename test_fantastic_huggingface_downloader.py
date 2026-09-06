@@ -993,6 +993,77 @@ check("un-favorited", _d.favorites, [])
 check("star cleared", _d.fav_btn.text(), "\u2606")
 _d.close()
 
+# ---- saving a Hugging Face token ------------------------------------------
+# The whole point of the app is not needing a terminal, and `hf auth login` was
+# the last thing that required one.
+import tempfile as _tf7, os as _os7
+_tokhome = _tf7.mkdtemp()
+_old_home, _old_hf = _os7.environ.get("HOME"), _os7.environ.pop("HF_TOKEN", None)
+_os7.environ["HOME"] = _tokhome
+try:
+    _tokpath = pathlib.Path(_tokhome) / ".cache" / "huggingface" / "token"
+    check("no token to begin with", H.read_saved_token(), None)
+
+    # must work offline: huggingface_hub.login() validates over the network and
+    # writes nothing if that fails, so it cannot be used here
+    H.save_token("hf_" + "a" * 34)
+    check("token saved", H.read_saved_token(), "hf_" + "a" * 34)
+    if _os7.name != "nt":
+        check("file is owner-only", oct(_tokpath.stat().st_mode)[-3:], "600")
+        check("directory is owner-only", oct(_tokpath.parent.stat().st_mode)[-3:], "700")
+
+    # whitespace from pasting must not corrupt it
+    H.save_token("  hf_" + "b" * 34 + "\n")
+    check("token is trimmed", H.read_saved_token(), "hf_" + "b" * 34)
+
+    check("removed", (H.clear_token(), H.read_saved_token())[1], None)
+    check("removing again is harmless", H.clear_token(), False)
+
+    # an exported HF_TOKEN silently beats the saved file, so it must be surfaced
+    check("no override normally", H.token_env_override(), None)
+    _os7.environ["HF_TOKEN"] = "hf_fromenv"
+    check("override detected", H.token_env_override(), "hf_fromenv")
+    _dlg = H.SettingsDialog()
+    assert "HF_TOKEN" in _dlg.status.text(), "the override is not surfaced to the user"
+    _dlg.close()
+    del _os7.environ["HF_TOKEN"]
+
+    # Nothing in the dialog may be cut off. A wrapped QLabel reports a single
+    # line from sizeHint, so a dialog sized from that hint clips the rest - and
+    # the token URL needs more than the 560px floor at larger system fonts.
+    from PySide6.QtWidgets import QLabel as _QLbl  # noqa: E402
+    from PySide6.QtGui import QFont as _QFont      # noqa: E402
+    _old_font = app.font()
+    for _pt in (9, 12, 16):
+        app.setFont(_QFont("Sans", _pt))
+        _sd = H.SettingsDialog()
+        _sd.show()
+        app.processEvents()
+        _cut = []
+        for _lbl in _sd.findChildren(_QLbl):
+            if _lbl.wordWrap():
+                if _lbl.heightForWidth(_lbl.width()) > _lbl.height():
+                    _cut.append(_lbl.text()[:30])
+            elif _lbl.sizeHint().width() > _lbl.width():
+                _cut.append(_lbl.text()[:30])
+        assert not _cut, f"clipped at {_pt}pt: {_cut}"
+        _sd.close()
+    app.setFont(_old_font)
+
+    # the dialog masks the token and offers to reveal it
+    _dlg2 = H.SettingsDialog()
+    from PySide6.QtWidgets import QLineEdit as _QLE2  # noqa: E402
+    check("masked by default", _dlg2.token_edit.echoMode(), _QLE2.EchoMode.Password)
+    _dlg2.show_btn.setChecked(True)
+    check("can be revealed", _dlg2.token_edit.echoMode(), _QLE2.EchoMode.Normal)
+    check("nothing to remove yet", _dlg2.remove_btn.isEnabled(), False)
+    _dlg2.close()
+finally:
+    if _old_home is not None:
+        _os7.environ["HOME"] = _old_home
+    if _old_hf is not None:
+        _os7.environ["HF_TOKEN"] = _old_hf
+
 # ---- the destination dropdown must look like a dropdown -------------------
 # The shared sheet styles QComboBox::drop-down but gives it no arrow, and once
 # a stylesheet touches a combo Qt stops drawing the native one - so the history
