@@ -942,6 +942,87 @@ for _rb, _want in [(_c.rb_file, H.MODE_FILE), (_c.rb_folder, H.MODE_FOLDER), (_c
     check(f"no phantom selection after cancelling from {_want}", _c.selected_paths, [])
 _c.close()
 
+# ---- signal declarations must match their emits ---------------------------
+# A Signal declared with three arguments while run() emits two raises inside
+# the worker thread, where it only reaches the console: the dialog just sits
+# there. Compare them statically so any mismatch fails here instead.
+import ast as _ast
+
+_tree = _ast.parse(pathlib.Path(H.__file__).read_text())
+_mismatches = []
+for _cls in [n for n in _ast.walk(_tree) if isinstance(n, _ast.ClassDef)]:
+    _declared = {}
+    for _node in _cls.body:
+        if (isinstance(_node, _ast.Assign) and isinstance(_node.value, _ast.Call)
+                and getattr(_node.value.func, "id", "") == "Signal"):
+            for _t in _node.targets:
+                if isinstance(_t, _ast.Name):
+                    _declared[_t.id] = len(_node.value.args)
+    if not _declared:
+        continue
+    for _node in _ast.walk(_cls):
+        if (isinstance(_node, _ast.Call)
+                and isinstance(_node.func, _ast.Attribute)
+                and _node.func.attr == "emit"
+                and isinstance(_node.func.value, _ast.Attribute)
+                and _node.func.value.attr in _declared):
+            _name = _node.func.value.attr
+            if len(_node.args) != _declared[_name]:
+                _mismatches.append(
+                    f"{_cls.name}.{_name} declares {_declared[_name]} arg(s) "
+                    f"but line {_node.lineno} emits {len(_node.args)}")
+check("every Signal matches its emits", _mismatches, [])
+
+# and the slots connected to them take the same number
+_slot_sigs = {"_checked": 2, "_info_ready": 3}
+for _fn in [n for n in _ast.walk(_tree)
+            if isinstance(n, _ast.FunctionDef) and n.name in _slot_sigs]:
+    _params = len(_fn.args.args) - 1        # minus self
+    check(f"{_fn.name} takes what its signal sends", _params, _slot_sigs[_fn.name])
+
+# ---- settings must reach disk immediately --------------------------------
+# QSettings buffers writes and flushes at event-loop idle. A favorite set just
+# before the app is killed - or before the terminal that launched it closes -
+# never reached the file, leaving an empty settings.ini and no favorites.
+# Only a real kill reproduces that, so this runs in a child process.
+import signal as _sig
+import subprocess as _sp2
+import tempfile as _tf8
+import time as _time
+
+_wdir = pathlib.Path(_tf8.mkdtemp())
+_shutil_src = pathlib.Path(H.__file__).read_text()
+(_wdir / "fantastic_huggingface_downloader.py").write_text(_shutil_src)
+(_wdir / "theme.py").write_text(pathlib.Path(H.Theme.__module__ + ".py").read_text()
+                                if pathlib.Path(H.Theme.__module__ + ".py").exists()
+                                else pathlib.Path("theme.py").read_text())
+(_wdir / "child.py").write_text(
+    "import sys, time\n"
+    "sys.path.insert(0, %r)\n" % str(_wdir) +
+    "import fantastic_huggingface_downloader as m\n"
+    "from PySide6.QtWidgets import QApplication\n"
+    "app = QApplication([])\n"
+    "w = m.MainWindow('hf'); w.lookup_debounce.stop()\n"
+    "w.dest_combo.setCurrentText('/mnt/ai/models/diffusion_models')\n"
+    "w._toggle_favorite()\n"
+    "w._remember_dest('/mnt/scratch/recent')\n"
+    "print('ready', flush=True)\n"
+    "time.sleep(30)\n"
+)
+_child = _sp2.Popen([sys.executable, str(_wdir / "child.py")],
+                    stdout=_sp2.PIPE, text=True,
+                    env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+assert _child.stdout.readline().strip() == "ready", "child never started"
+_time.sleep(0.4)
+_child.send_signal(_sig.SIGKILL)      # no clean shutdown, no atexit, no flush
+_child.wait(timeout=10)
+
+_written = (_wdir / "settings.ini").read_text() if (_wdir / "settings.ini").exists() else ""
+assert "dest_favorites" in _written, (
+    "the favorite never reached disk before the process died - settings.ini is "
+    f"{len(_written)} bytes")
+assert "dest_history" in _written, "the recent destination never reached disk"
+
 # ---- destination favorites and recents -----------------------------------
 check("recent list caps at ten", H.MAX_HISTORY, 10)
 check("settings list of one comes back as a list", H._as_path_list("/only/one"), ["/only/one"])
@@ -998,10 +1079,15 @@ _d.close()
 # the last thing that required one.
 import tempfile as _tf7, os as _os7
 _tokhome = _tf7.mkdtemp()
-_old_home, _old_hf = _os7.environ.get("HOME"), _os7.environ.pop("HF_TOKEN", None)
-_os7.environ["HOME"] = _tokhome
+_old_hf = _os7.environ.pop("HF_TOKEN", None)
+# Redirect the token path itself rather than moving HOME. With huggingface_hub
+# installed the path comes from a constant frozen at import, so changing HOME
+# here does nothing and these writes would land on - and delete - the real
+# token belonging to whoever runs this suite.
+_tokpath = pathlib.Path(_tokhome) / ".cache" / "huggingface" / "token"
+_real_token_path = H.hf_token_path
+H.hf_token_path = lambda: _tokpath
 try:
-    _tokpath = pathlib.Path(_tokhome) / ".cache" / "huggingface" / "token"
     check("no token to begin with", H.read_saved_token(), None)
 
     # must work offline: huggingface_hub.login() validates over the network and
@@ -1059,10 +1145,12 @@ try:
     check("nothing to remove yet", _dlg2.remove_btn.isEnabled(), False)
     _dlg2.close()
 finally:
-    if _old_home is not None:
-        _os7.environ["HOME"] = _old_home
+    H.hf_token_path = _real_token_path
     if _old_hf is not None:
         _os7.environ["HF_TOKEN"] = _old_hf
+
+# nothing above may have touched the real token file
+assert H.hf_token_path() != _tokpath, "the token path was left redirected"
 
 # ---- the destination dropdown must look like a dropdown -------------------
 # The shared sheet styles QComboBox::drop-down but gives it no arrow, and once

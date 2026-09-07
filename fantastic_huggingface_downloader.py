@@ -746,7 +746,7 @@ def clear_token() -> bool:
 class TokenCheckWorker(QThread):
     """Asks the Hub who the token belongs to, without blocking the dialog."""
 
-    done = Signal(str, str, str)     # username, error, kind ("auth"/"offline"/"other")
+    done = Signal(str, str)          # username, error
 
     def __init__(self, token: str, parent=None):
         super().__init__(None)
@@ -1926,6 +1926,10 @@ class MainWindow(QWidget):
             self.favorites.insert(0, path)
             self._log(f"[destinations] favorited {path}")
         self.settings.setValue("dest_favorites", self.favorites)
+        # QSettings buffers writes and flushes on its own schedule, so a
+        # favorite set just before the app is killed or the terminal that
+        # launched it is closed would never reach disk.
+        self.settings.sync()
         self._rebuild_dest_combo(path)
 
     def _remember_dest(self, path: str) -> None:
@@ -1937,11 +1941,13 @@ class MainWindow(QWidget):
             self.recents = self.recents[:MAX_HISTORY]
             self.settings.setValue("dest_history", self.recents)
         self.settings.setValue("dest", path)
+        self.settings.sync()
         self._rebuild_dest_combo(path)
 
     def closeEvent(self, event) -> None:
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("dest", self.dest_combo.currentText().strip())
+        self.settings.sync()
         if self.current_item is not None:
             pending = sum(1 for i in self.queue if i.status == STATUS_QUEUED)
             extra = f" and {pending} still queued" if pending else ""
@@ -2338,6 +2344,7 @@ class MainWindow(QWidget):
 
     def _autostart_toggled(self, on: bool) -> None:
         self.settings.setValue("autostart", bool(on))
+        self.settings.sync()
         if on:
             self._pump_queue()
         self._refresh_queue()
