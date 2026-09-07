@@ -588,6 +588,10 @@ class QueueItem:
     mode: str
     dest: str          # the folder the user picked for the file itself
     label: str
+    # Set for a link to one specific file: that file belongs in the chosen
+    # folder, full stop, even if it means moving it out of the repo's own
+    # subfolder afterwards. Folder and multi-file downloads keep their layout.
+    land_in_dest: bool = False
     size: int = 0
     files: list[tuple[str, int]] = field(default_factory=list)
     status: str = STATUS_QUEUED
@@ -614,9 +618,19 @@ class QueueItem:
 
     def final_dir(self) -> str:
         """Where this item's files actually end up."""
+        if self.land_in_dest:
+            return self.dest
         prefix = self.strip_prefix()
         base = Path(self.local_dir())
         return str(base / prefix) if prefix else str(base)
+
+    def downloaded_path(self) -> Path:
+        """Where hf will have written this item's file, before any move."""
+        return Path(self.local_dir()) / self.target.path
+
+    def wanted_path(self) -> Path:
+        """Where the user asked for it to be."""
+        return Path(self.dest) / Path(self.target.path).name
 
     def args(self, force_human: bool) -> list[str]:
         return build_args(self.target, self.mode, force_human) + [
@@ -665,6 +679,7 @@ def items_for_request(
             label=label,
             size=sum(sz for _, sz in files),
             files=files,
+            land_in_dest=(mode == MODE_FILE),
         )
     ]
 
@@ -2728,16 +2743,60 @@ class MainWindow(QWidget):
             return
 
         self.bar.setValue(100)
+        moved = self._land_in_dest(item)
         item.status = STATUS_DONE
         item.detail = "Done"
         removed = self._clean_sidecar(item)
-        self.status_label.setText(
-            f"Finished {item.label}." + (f" Cleared {removed} sidecar file(s)." if removed else "")
-        )
+        message = f"Finished {item.label}."
+        if moved:
+            message += " Moved into the folder you chose."
+        self.status_label.setText(message)
         self._refresh_queue()
         self._pump_queue()
         self._refresh()
 
+
+    def _land_in_dest(self, item: "QueueItem") -> bool:
+        """
+        Put a single-file download in the folder the user actually picked.
+
+        hf can only write to <--local-dir>/<path inside the repo>, so when the
+        chosen folder does not already line up with that path the file arrives
+        one or more directories deeper. A link to one specific file is a request
+        for that file to be in that folder, so it gets moved.
+
+        The cost is real and worth knowing: hf looks for the file at its
+        repo-relative path when you download it again, so a moved file is
+        re-fetched rather than hash-checked. Nothing is moved when the
+        destination already lines up, which is the case that keeps the check.
+        """
+        if not item.land_in_dest or not item.target.path:
+            return False
+        source = item.downloaded_path()
+        target = item.wanted_path()
+        if source == target or not source.is_file():
+            return False
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target.unlink()
+            source.replace(target)
+        except OSError as exc:
+            self._log(f"[move] could not put {target.name} in {target.parent}: {exc}")
+            return False
+        self._log(f"[move] {source} -> {target}")
+        self._prune_empty_dirs(source.parent, Path(item.local_dir()))
+        return True
+
+    def _prune_empty_dirs(self, start: Path, stop: Path) -> None:
+        """Remove directories the move emptied, never past the local dir."""
+        current = start
+        while current != stop and stop in current.parents:
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
 
     # -- sidecar cleanup ---------------------------------------------------
 

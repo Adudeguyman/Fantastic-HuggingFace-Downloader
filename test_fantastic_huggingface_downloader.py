@@ -516,6 +516,37 @@ _prev = H.preview_command("hf-does-not-exist", _blob2, H.MODE_FILE, _dest)
 check("preview and execution agree on --local-dir",
       _prev.split("--local-dir")[-1].strip(), _it.args(False)[-1])
 
+# ---- a link to one file means that folder, no subfolders ------------------
+# hf can only write to <--local-dir>/<repo path>, so a file in the repo's
+# diffusion_models/ arrives one directory deep unless the chosen folder happens
+# to line up. A link to a specific file is a request for it to be IN that
+# folder, so single-file items get moved; every other mode keeps its layout.
+_lst = [("diffusion_models/a.safetensors", 1), ("diffusion_models/b.safetensors", 2),
+        ("vae/v.safetensors", 3)]
+_blob3 = H.parse_hf_url("https://huggingface.co/t8/V/blob/main/diffusion_models/a.safetensors")
+_tree3 = H.parse_hf_url("https://huggingface.co/t8/V/tree/main/diffusion_models")
+_repo3 = H.parse_hf_url("https://huggingface.co/t8/V")
+
+_one = H.items_for_request(_blob3, H.MODE_FILE, "/ai/models", _lst, [])[0]
+check("a file link lands in the chosen folder", _one.final_dir(), "/ai/models")
+check("single-file items are moved", _one.land_in_dest, True)
+check("wanted path has no subfolder", str(_one.wanted_path()), "/ai/models/a.safetensors")
+
+# ...but nothing is moved when the destination already lines up, which is the
+# case that keeps hf's hash check working
+_aligned = H.items_for_request(_blob3, H.MODE_FILE, "/ai/models/diffusion_models", _lst, [])[0]
+check("aligned destination needs no move",
+      _aligned.downloaded_path(), _aligned.wanted_path())
+
+for _mode, _sel, _name in [
+    (H.MODE_FOLDER, [], "its folder"),
+    (H.MODE_REPO, [], "whole repo"),
+    (H.MODE_SELECT, ["diffusion_models/a.safetensors"], "choose files"),
+]:
+    _tgt = _tree3 if _mode == H.MODE_FOLDER else _repo3
+    for _it in H.items_for_request(_tgt, _mode, "/ai/models", _lst, _sel):
+        check(f"{_name} keeps the repo layout", _it.land_in_dest, False)
+
 # ---- queue construction ---------------------------------------------------
 qrepo = H.parse_hf_url("https://huggingface.co/Comfy-Org/MiniMax-H3")
 qblob = H.parse_hf_url("https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/big.safetensors")

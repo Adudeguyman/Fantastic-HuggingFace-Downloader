@@ -55,12 +55,12 @@ and so on. That is convenient when it lines up with your setup and annoying
 when it does not.
 
 So the destination box means *where this file should end up*, not *where to
-dump the repo*. Point it at `.../ComfyUI/models/diffusion_models` for a file
-that lives in `diffusion_models/` inside the repo, and the file lands exactly
-there — no nested duplicate folder, nothing to move afterwards.
+dump the repo*. Link to a single file and it lands in the folder you picked,
+full stop — no subfolder is created for it.
 
-If the folder you choose does not line up with the repo's own structure, that
-structure appears underneath it instead, and a line under the box tells you
+Folder, whole-repo and chosen-files downloads are different: those keep the
+repo's structure underneath the folder you pick, because there the layout is
+usually the reason you wanted the whole thing. A line under the box tells you
 where files will actually land before you commit to anything.
 
 Each queued item remembers its own destination, so you can point some files at

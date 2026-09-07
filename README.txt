@@ -150,18 +150,26 @@ Destination
   Where the files themselves should end up, for the NEXT thing you add to the
   queue. Existing queue items keep the destination they were given.
 
-  hf writes to <--local-dir>/<the file's path inside the repo>, and it checks
-  the file at that same path when you download it again. So if the folder you
-  pick already ends with the repo's own subfolder - picking
+  A link to one specific file always lands in the folder you pick, with no
+  subfolders created. That is the point of pointing at a folder.
+
+  Getting there takes one of two routes. hf writes to
+  <--local-dir>/<the file's path inside the repo>, so when the folder you pick
+  already ends with the repo's own subfolder - picking
   .../ComfyUI/models/diffusion_models for a file at
   diffusion_models/model.safetensors - the app hands hf the parent instead and
-  the file lands exactly where you pointed. Nothing is moved afterwards, which
-  is what keeps the verification working.
+  the file arrives exactly where you wanted with nothing moved. Otherwise the
+  file is moved into your folder once it finishes.
 
-  If the folder does not line up, it is used as-is and the repo's structure
-  appears underneath it. A line under the box tells you where files will land
-  whenever that differs from what you picked, and the command preview always
-  shows the real --local-dir.
+  That move has a cost worth knowing: hf looks for a file at its repo-relative
+  path when you download it again, so a file that was moved is fetched again
+  rather than hash-checked. Lining your destination up with the repo's folder
+  name avoids the move and keeps the check.
+
+  Folder, whole-repo and chosen-files downloads keep the repo's structure
+  underneath the folder you pick - there the layout is usually the point. A
+  line under the box tells you where files will land, and the command preview
+  always shows the real --local-dir.
 
   If the folder you pick is itself a separate disk, mounted or symlinked into
   the tree, nothing is stripped - otherwise the download would be staged on
