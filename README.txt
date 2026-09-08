@@ -211,8 +211,14 @@ Progress
 
   The percentage is derived from those same bytes rather than from the
   percentage the CLI prints, because the reconstruction bar reports 0% for as
-  long as it is buffering. A printed percentage is used as a floor when it is
-  ahead. The bar never moves backwards.
+  long as it is buffering. The file's own printed percentage is used as a floor
+  when it is ahead, since that one is measured in bytes too.
+
+  The CLI also prints a "Fetching N files" line during folder and whole-repo
+  downloads. That counts FILES, not bytes, so on a repo of nine small files and
+  one large one it reads 90% while almost nothing has downloaded. The bar
+  ignores it whenever byte figures are available. The bar never moves
+  backwards.
 
   Speed and ETA come from that one byte figure too, averaged over the last few
   seconds rather than taken from the last tick. Xet writes to disk in bursts,

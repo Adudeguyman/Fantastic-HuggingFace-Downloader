@@ -2676,11 +2676,18 @@ class MainWindow(QWidget):
         if total and done:
             percent = int(min(100, done * 100 / total))
 
-        printed = self.state.overall_percent
-        if printed is None:
-            printed = self.state.percent
-        if printed is not None:
-            percent = printed if percent is None else max(percent, printed)
+        # The per-file bar's percentage is itself byte-based, so it is a fair
+        # floor when our own count lags. "Fetching N files" is NOT: it counts
+        # files, so nine small files and one large one reads 90% with barely
+        # any bytes moved. Use that only when we have no byte figures at all.
+        if percent is None:
+            percent = (
+                self.state.percent
+                if self.state.percent is not None
+                else self.state.overall_percent
+            )
+        elif self.state.percent is not None:
+            percent = max(percent, self.state.percent)
 
         if percent is not None:
             # never let the bar retreat: several bars interleave on stderr and

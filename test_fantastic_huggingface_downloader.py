@@ -1229,6 +1229,54 @@ _allowed = {"#FFFFFF", "#2f6fed"}   # white icon fills, and the documented defau
 _stray = _hexes - _allowed
 check("no hand-picked colors in the app", sorted(_stray), [])
 
+# ---- the bar measures bytes, not files ------------------------------------
+# The CLI prints "Fetching N files: X%", which counts FILES. On a repo of nine
+# small files and one large one that reads 90% with almost no bytes moved, and
+# using it as a floor made the bar jump there.
+import tempfile as _tf9
+_bw = H.MainWindow("hf-does-not-exist")
+_bw.lookup_debounce.stop()
+_bw.dest_combo.setCurrentText(_tf9.mkdtemp())
+_bw.total_bytes = 10_000_000_000
+_bw.started_at = 0.0
+_bw.bar_percent = 0
+_bw.samples = H.deque()
+_bw.state = H.ProgressState()
+_bw.state.overall_percent = 90          # nine of ten files
+_bw.state.transfer_bytes = 200_000_000  # but only 2% of the bytes
+_bw._tick()
+check("bytes beat the file count", _bw.bar.value(), 2)
+
+# with no byte figures at all, the file count is still better than nothing
+_bw2 = H.MainWindow("hf-does-not-exist")
+_bw2.lookup_debounce.stop()
+_bw2.dest_combo.setCurrentText(_tf9.mkdtemp())
+_bw2.total_bytes = None
+_bw2.started_at = 0.0
+_bw2.bar_percent = 0
+_bw2.samples = H.deque()
+_bw2.state = H.ProgressState()
+_bw2.state.overall_percent = 40
+_bw2._tick()
+check("file count used only as a fallback", _bw2.bar.value(), 40)
+
+# the PER-FILE printed percentage is byte-based, so it stays a valid floor
+_bw3 = H.MainWindow("hf-does-not-exist")
+_bw3.lookup_debounce.stop()
+_bw3.dest_combo.setCurrentText(_tf9.mkdtemp())
+_bw3.total_bytes = 10_000_000_000
+_bw3.started_at = 0.0
+_bw3.bar_percent = 0
+_bw3.samples = H.deque()
+_bw3.state = H.ProgressState()
+_bw3.state.percent = 70                 # the file's own bar, in bytes
+_bw3.state.transfer_bytes = 200_000_000
+_bw3._tick()
+check("per-file percentage still acts as a floor", _bw3.bar.value(), 70)
+_bw3.close()
+_bw.close()
+_bw2.close()
+
 # ---- child environment ---------------------------------------------------
 env = H.download_environment()
 # huggingface_hub builds bars with disable=None, so tqdm auto-disables without
